@@ -3,9 +3,6 @@ package raknet
 import (
 	"bytes"
 	"fmt"
-	"github.com/df-mc/atomic"
-	"github.com/sandertv/go-raknet/internal/message"
-	"golang.org/x/exp/slices"
 	"log"
 	"math"
 	"math/rand"
@@ -13,6 +10,10 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/df-mc/atomic"
+	"github.com/sandertv/go-raknet/internal/message"
+	"golang.org/x/exp/slices"
 )
 
 // UpstreamPacketListener allows for a custom PacketListener implementation.
@@ -63,6 +64,12 @@ type Listener struct {
 	// pongData is a byte slice of data that is sent in an unconnected pong packet each time the client sends
 	// and unconnected ping to the server.
 	pongData atomic.Value[[]byte]
+
+	// blockedAddresses contains ip addresses that are blocked and the time they will be unblocked
+	blockedAddresses sync.Map
+
+	// numPackets contains the number of packets sent per ip in the last second
+	numPackets sync.Map
 }
 
 // listenerID holds the next ID to use for a Listener.
@@ -157,12 +164,43 @@ func (listener *Listener) ID() int64 {
 	return listener.id
 }
 
+func (listener *Listener) BlockAddress(ip net.Addr, duration time.Duration) {
+	host, _, _ := net.SplitHostPort(ip.String())
+	listener.blockedAddresses.Store(host, time.Now().Add(duration))
+}
+
+func (listener *Listener) UnblockAddress(ip net.Addr) {
+	host, _, _ := net.SplitHostPort(ip.String())
+	listener.blockedAddresses.Delete(host)
+}
+
 // listen continuously reads from the listener's UDP connection, until closed has a value in it.
 func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
 	b := make([]byte, 1500)
 	buf := bytes.NewBuffer(b[:0])
+	ticker := time.NewTicker(1 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-listener.closed:
+				return
+			case <-ticker.C:
+				listener.numPackets.Range(func(key interface{}, value interface{}) bool {
+					listener.numPackets.Delete(key)
+					return true
+				})
+				listener.blockedAddresses.Range(func(key interface{}, value interface{}) bool {
+					unbanTime, ok := value.(time.Time)
+					if ok && time.Now().After(unbanTime) {
+						listener.blockedAddresses.Delete(key)
+					}
+					return true
+				})
+			}
+		}
+	}()
 	for {
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
@@ -173,9 +211,7 @@ func (listener *Listener) listen() {
 
 		// Technically we should not re-use the same byte slice after its ownership has been taken by the
 		// buffer, but we can do this anyway because we copy the data later.
-		if err := listener.handle(buf, addr); err != nil {
-			listener.log.Printf("listener: error handling packet (addr = %v): %v\n", addr, err)
-		}
+		listener.handle(buf, addr)
 		buf.Reset()
 	}
 }
@@ -183,12 +219,33 @@ func (listener *Listener) listen() {
 // handle handles an incoming packet in buffer b from the address passed. If not successful, an error is
 // returned describing the issue.
 func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
+	ip, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return err
+	}
+
+	if _, ok := listener.blockedAddresses.Load(ip); ok {
+		return nil
+	}
+
+	num, _ := listener.numPackets.Load(ip)
+	numPackets, ok := num.(int)
+	if !ok {
+		numPackets = 0
+	}
+	listener.numPackets.Store(ip, numPackets+1)
+
+	if numPackets > 10000 {
+		listener.BlockAddress(addr, 300*time.Second)
+	}
+
 	value, found := listener.connections.Load(addr.String())
 	if !found {
 		// If there was no session yet, it means the packet is an offline message. It is not contained in a
 		// datagram.
 		packetID, err := b.ReadByte()
 		if err != nil {
+			listener.BlockAddress(addr, 5*time.Second)
 			return fmt.Errorf("error reading packet ID byte: %v", err)
 		}
 		switch packetID {
@@ -200,6 +257,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
 			if packetID&bitFlagDatagram == 0 {
+				listener.BlockAddress(addr, 5*time.Second)
 				return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
 			}
 		}
