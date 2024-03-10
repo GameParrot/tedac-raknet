@@ -166,6 +166,7 @@ func (listener *Listener) ID() int64 {
 
 func (listener *Listener) BlockAddress(ip net.Addr, duration time.Duration) {
 	host, _, _ := net.SplitHostPort(ip.String())
+	listener.log.Printf("Blocked %s for %f seconds", ip, duration.Seconds())
 	listener.blockedAddresses.Store(host, time.Now().Add(duration))
 }
 
