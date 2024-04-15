@@ -180,6 +180,14 @@ func (listener *Listener) UnblockAddress(ip net.Addr) {
 	listener.blockedAddresses.Delete(host)
 }
 
+func (listener *Listener) SetQueryInfo(queryInfo map[string]string) {
+	listener.queryHandler.SetQueryInfo(queryInfo)
+}
+
+func (listener *Listener) SetQueryPlayers(queryPlayers []string) {
+	listener.queryHandler.SetPlayers(queryPlayers)
+}
+
 // listen continuously reads from the listener's UDP connection, until closed has a value in it.
 func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
@@ -260,14 +268,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
 		case query.Header[0]:
-			versonByte2, err := b.ReadByte()
-			if err != nil {
-				return fmt.Errorf("error query version byte 2: %v", err)
-			}
-			if versonByte2 != query.Header[1] {
-				return nil
-			}
-			return listener.queryHandler.HandlePacket(b, addr)
+			return listener.handleQuery(b, addr)
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
@@ -358,4 +359,19 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: listener.pongData.Load()}).Write(b)
 	_, err := listener.conn.WriteTo(b.Bytes(), addr)
 	return err
+}
+
+func (listener *Listener) handleQuery(b *bytes.Buffer, addr net.Addr) error {
+	versonByte2, err := b.ReadByte()
+	if err != nil {
+		return fmt.Errorf("error query version byte 2: %v", err)
+	}
+	if versonByte2 != query.Header[1] {
+		return nil
+	}
+	if err := listener.queryHandler.HandlePacket(b, addr); err != nil {
+		return err
+	}
+	_, _ = listener.conn.WriteTo(b.Bytes(), addr)
+	return nil
 }
