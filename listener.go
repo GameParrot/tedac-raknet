@@ -13,6 +13,7 @@ import (
 
 	"github.com/df-mc/atomic"
 	"github.com/sandertv/go-raknet/internal/message"
+	"github.com/sandertv/go-raknet/query"
 	"golang.org/x/exp/slices"
 )
 
@@ -70,6 +71,9 @@ type Listener struct {
 
 	// numPackets contains the number of packets sent per ip in the last second
 	numPackets sync.Map
+
+	//queryHandler is the UT3 query handler
+	queryHandler *query.QueryHandler
 }
 
 // listenerID holds the next ID to use for a Listener.
@@ -93,12 +97,13 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	listener := &Listener{
-		closed:    make(chan struct{}),
-		conn:      conn,
-		id:        listenerID.Inc(),
-		incoming:  make(chan *Conn),
-		log:       log.New(os.Stderr, "", log.LstdFlags),
-		protocols: []byte{currentProtocol},
+		closed:       make(chan struct{}),
+		conn:         conn,
+		id:           listenerID.Inc(),
+		incoming:     make(chan *Conn),
+		log:          log.New(os.Stderr, "", log.LstdFlags),
+		protocols:    []byte{currentProtocol},
+		queryHandler: query.New(map[string]string{}, []string{}),
 	}
 	if l.ErrorLog != nil {
 		listener.log = l.ErrorLog
@@ -254,6 +259,15 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			return listener.handleUnconnectedPing(b, addr)
 		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
+		case query.Header[0]:
+			versonByte2, err := b.ReadByte()
+			if err != nil {
+				return fmt.Errorf("error query version byte 2: %v", err)
+			}
+			if versonByte2 != query.Header[1] {
+				return nil
+			}
+			return listener.queryHandler.HandlePacket(b, addr)
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
