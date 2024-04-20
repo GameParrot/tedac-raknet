@@ -34,6 +34,9 @@ type ListenConfig struct {
 
 	// UpstreamPacketListener adds an abstraction for net.ListenPacket.
 	UpstreamPacketListener UpstreamPacketListener
+
+	// If enabled, respond to UT3 query requests
+	EnableQuery bool
 }
 
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
@@ -74,6 +77,9 @@ type Listener struct {
 
 	//queryHandler is the UT3 query handler
 	queryHandler *query.QueryHandler
+
+	// If enabled, respond to UT3 query requests
+	enableQuery bool
 }
 
 // listenerID holds the next ID to use for a Listener.
@@ -104,6 +110,7 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		log:          log.New(os.Stderr, "", log.LstdFlags),
 		protocols:    []byte{currentProtocol},
 		queryHandler: query.New(map[string]string{}, []string{}),
+		enableQuery:  l.EnableQuery,
 	}
 	if l.ErrorLog != nil {
 		listener.log = l.ErrorLog
@@ -268,7 +275,9 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
 		case query.Header[0]:
-			return listener.handleQuery(b, addr)
+			if listener.enableQuery {
+				return listener.handleQuery(b, addr)
+			}
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
