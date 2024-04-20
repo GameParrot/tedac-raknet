@@ -170,6 +170,11 @@ func (listener *Listener) PongData(data []byte) {
 	listener.pongData.Store(data)
 }
 
+// EnableQuery sets if queries are enabled
+func (listener *Listener) EnableQuery(enabled bool) {
+	listener.enableQuery = enabled
+}
+
 // ID returns the unique ID of the listener. This ID is usually used by a client to identify a specific
 // server during a single session.
 func (listener *Listener) ID() int64 {
