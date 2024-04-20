@@ -13,6 +13,7 @@ import (
 
 	"github.com/df-mc/atomic"
 	"github.com/sandertv/go-raknet/internal/message"
+	"github.com/sandertv/go-raknet/query"
 	"golang.org/x/exp/slices"
 )
 
@@ -33,6 +34,9 @@ type ListenConfig struct {
 
 	// UpstreamPacketListener adds an abstraction for net.ListenPacket.
 	UpstreamPacketListener UpstreamPacketListener
+
+	// If enabled, respond to UT3 query requests
+	EnableQuery bool
 }
 
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
@@ -70,6 +74,12 @@ type Listener struct {
 
 	// numPackets contains the number of packets sent per ip in the last second
 	numPackets sync.Map
+
+	//queryHandler is the UT3 query handler
+	queryHandler *query.QueryHandler
+
+	// If enabled, respond to UT3 query requests
+	enableQuery bool
 }
 
 // listenerID holds the next ID to use for a Listener.
@@ -93,12 +103,14 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	listener := &Listener{
-		closed:    make(chan struct{}),
-		conn:      conn,
-		id:        listenerID.Inc(),
-		incoming:  make(chan *Conn),
-		log:       log.New(os.Stderr, "", log.LstdFlags),
-		protocols: []byte{currentProtocol},
+		closed:       make(chan struct{}),
+		conn:         conn,
+		id:           listenerID.Inc(),
+		incoming:     make(chan *Conn),
+		log:          log.New(os.Stderr, "", log.LstdFlags),
+		protocols:    []byte{currentProtocol},
+		queryHandler: query.New(map[string]string{}, []string{}),
+		enableQuery:  l.EnableQuery,
 	}
 	if l.ErrorLog != nil {
 		listener.log = l.ErrorLog
@@ -173,6 +185,14 @@ func (listener *Listener) BlockAddress(ip net.Addr, duration time.Duration) {
 func (listener *Listener) UnblockAddress(ip net.Addr) {
 	host, _, _ := net.SplitHostPort(ip.String())
 	listener.blockedAddresses.Delete(host)
+}
+
+func (listener *Listener) SetQueryInfo(queryInfo map[string]string) {
+	listener.queryHandler.SetQueryInfo(queryInfo)
+}
+
+func (listener *Listener) SetQueryPlayers(queryPlayers []string) {
+	listener.queryHandler.SetPlayers(queryPlayers)
 }
 
 // listen continuously reads from the listener's UDP connection, until closed has a value in it.
@@ -254,6 +274,10 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			return listener.handleUnconnectedPing(b, addr)
 		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
+		case query.Header[0]:
+			if listener.enableQuery {
+				return listener.handleQuery(b, addr)
+			}
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
@@ -344,4 +368,19 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: listener.pongData.Load()}).Write(b)
 	_, err := listener.conn.WriteTo(b.Bytes(), addr)
 	return err
+}
+
+func (listener *Listener) handleQuery(b *bytes.Buffer, addr net.Addr) error {
+	versonByte2, err := b.ReadByte()
+	if err != nil {
+		return fmt.Errorf("error query version byte 2: %v", err)
+	}
+	if versonByte2 != query.Header[1] {
+		return nil
+	}
+	if err := listener.queryHandler.HandlePacket(b, addr); err != nil {
+		return err
+	}
+	_, _ = listener.conn.WriteTo(b.Bytes(), addr)
+	return nil
 }
